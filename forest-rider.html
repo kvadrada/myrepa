@@ -388,7 +388,7 @@ function advanceLevel(){
 function updateCamera(dt){
   if(pl.dead)return;
   const tx=pl.x-W*0.28;
-  const ty=pl.y-H*0.44; // keep player at 44% from top
+  const ty=pl.y-H*0.38; // keep player at 38% from top (more sky, less terrain body)
   camX+=(tx-camX)*Math.min(1,0.09*dt);
   camY+=(ty-camY)*Math.min(1,0.06*dt);
 }
@@ -580,8 +580,12 @@ function drawTerrain(){
       if(!started){g.moveTo(sx_,sy_);started=true;}else g.lineTo(sx_,sy_);
     }
     if(!started)return;
-    g.lineTo(wx(xe),H+40);g.lineTo(wx(xs),H+40);g.closePath();
-    const tg=g.createLinearGradient(0,wy(tGenY-H*0.3),0,H+40);
+    const DEPTH=140;
+    g.lineTo(wx(xe),wy(tRaw(xe).y)+DEPTH);
+    for(let x=xe-step;x>=xs;x-=step){const cx=Math.max(x,xs);g.lineTo(wx(cx),wy(tRaw(cx).y)+DEPTH);}
+    g.closePath();
+    const midSY=wy(tRaw((xs+xe)*0.5).y);
+    const tg=g.createLinearGradient(0,midSY-20,0,midSY+DEPTH);
     tg.addColorStop(0,topC);tg.addColorStop(1,lerpHex('#060c04','#020508',na));
     g.fillStyle=tg;g.fill();
     // edge stroke
