@@ -114,7 +114,10 @@ let currentLevel=1,levelTimer=LEVEL_SEC,levelPending=false,levelShowT=0,speedBoo
 
 // ── terrain (Catmull-Rom) ──────────────────────────────────────────
 let terrain=[],tLastX=0,tGenY=0,tTrend=0,tTC=0;
-function tInfo(x){
+// gaps: {s:worldX start, e:worldX end}
+let gaps=[],gapFrontier=800;
+
+function tRaw(x){
   const n=terrain.length;
   if(n<4)return{y:0,ang:0};
   let i=Math.floor((x-terrain[0].x)/SEG_W);i=clamp(i,1,n-3);
@@ -123,6 +126,27 @@ function tInfo(x){
   const y=0.5*((2*p1)+(-p0+p2)*t+(2*p0-5*p1+4*p2-p3)*t2+(-p0+3*p1-3*p2+p3)*t3);
   const dy=0.5*((-p0+p2)+2*(2*p0-5*p1+4*p2-p3)*t+3*(-p0+3*p1-3*p2+p3)*t2)/SEG_W;
   return{y,ang:Math.atan(dy)};
+}
+function inGap(x){
+  for(const gap of gaps)if(x>gap.s+6&&x<gap.e-6)return true;
+  return false;
+}
+function tInfo(x){
+  if(inGap(x))return{y:99999,ang:0}; // player falls through
+  return tRaw(x);
+}
+function genGaps(upTo){
+  if(currentLevel<3){gapFrontier=Math.max(gapFrontier,upTo);return;}
+  const minW=80+currentLevel*2, maxW=110+currentLevel*3;
+  const spacing=Math.max(300,560-currentLevel*14);
+  while(gapFrontier<upTo){
+    gapFrontier+=spacing+Math.random()*220;
+    if(Math.abs(tRaw(gapFrontier).ang)>0.22)continue;
+    const w=minW+Math.random()*(maxW-minW);
+    gaps.push({s:gapFrontier,e:gapFrontier+w});
+    gapFrontier+=w+200;
+  }
+  gaps=gaps.filter(gap=>gap.e>camX-200);
 }
 function genTerrain(upTo){
   const cfg=getLvlCfg(currentLevel);
@@ -154,41 +178,44 @@ function genTrees(upTo){
   trees=trees.filter(t=>t.x>camX-300);
 }
 
-// ── coins: always above terrain ────────────────────────────────────
+// ── coins: always above terrain, never in gaps ────────────────────
 let coins=[],coinEnd=200;
 function genCoins(upTo){
   while(coinEnd<upTo){
     coinEnd+=160+Math.random()*220;
+    if(inGap(coinEnd)){coinEnd+=120;continue;}
     if(Math.random()<0.5){
       const n=5+Math.floor(Math.random()*3);
       for(let i=0;i<n;i++){
         const x=coinEnd+i*42;
-        const ty=tInfo(x).y;
+        if(inGap(x))continue;
+        const ty=tRaw(x).y;
         coins.push({x,y:ty-(36+Math.sin(i/(n-1)*Math.PI)*52),hit:false,ph:Math.random()*6.28});
       }
       coinEnd+=n*42;
     } else {
-      const x=coinEnd,ty=tInfo(x).y;
-      coins.push({x,y:ty-(34+Math.random()*50),hit:false,ph:Math.random()*6.28});
+      const ty=tRaw(coinEnd).y;
+      coins.push({x:coinEnd,y:ty-(34+Math.random()*50),hit:false,ph:Math.random()*6.28});
     }
   }
   coins=coins.filter(cn=>{
     if(cn.hit&&cn.x<camX-90)return false;
-    const ty=tInfo(cn.x).y;if(cn.y>ty-24)cn.y=ty-24; // safety clamp
+    if(inGap(cn.x))return false;
+    const ty=tRaw(cn.x).y;if(cn.y>ty-24)cn.y=ty-24;
     return true;
   });
 }
 
-// ── obstacles ─────────────────────────────────────────────────────
+// ── obstacles: from level 1, skip gaps and steep slopes ──────────
 const OBS={rock:{hw:22,h:30},log:{hw:28,h:16},stump:{hw:13,h:24},crate:{hw:17,h:22}};
-let obstacles=[],obstEnd=400;
+let obstacles=[],obstEnd=350;
 function genObstacles(upTo){
-  if(currentLevel<2){obstEnd=Math.max(obstEnd,upTo);return;}
   const cfg=getLvlCfg(currentLevel);
   while(obstEnd<upTo){
     obstEnd+=cfg.obstGap+Math.random()*160;
-    if(Math.abs(tInfo(obstEnd).ang)>0.28)continue;
-    const types=['rock'];
+    if(inGap(obstEnd)||inGap(obstEnd-60)||inGap(obstEnd+60))continue;
+    if(Math.abs(tRaw(obstEnd).ang)>0.26)continue;
+    const types=['rock','rock']; // rocks always available
     if(cfg.hasLog)types.push('log','log');
     if(cfg.hasStump)types.push('stump');
     if(cfg.hasCrate)types.push('crate');
@@ -291,8 +318,10 @@ function updatePlayer(dt){
       pl.y=ti.y-PLR_H;
       const sl=ti.ang;
       const diff=angNorm(pl.angle-sl);
-      // crash if landing angle >75° off slope OR badly inverted
-      if(Math.abs(diff)>Math.PI*0.42&&pl.vy>3.5){
+      // crash ONLY if was actually spinning AND landed badly inverted
+      // normal jump (no spin) is always safe — just like Alto's Adventure
+      const wasSpinning=Math.abs(pl.spinTotal)>Math.PI*0.30;
+      if(wasSpinning&&Math.abs(diff)>Math.PI*0.54&&pl.vy>5.0){
         killPlayer();return;
       }
       const flips=Math.floor(Math.abs(pl.spinTotal)/(Math.PI*2));
@@ -478,27 +507,105 @@ function drawTree(tree){
   }
   g.restore();
 }
+function drawGaps(){
+  if(!gaps.length)return;
+  const na=nightAmt(dayTime);
+  for(const gap of gaps){
+    const gsx=wx(gap.s),gex=wx(gap.e);
+    if(gex<-20||gsx>W+20)continue;
+    const ly=tRaw(gap.s).y,ry=tRaw(gap.e).y;
+    const lsy=wy(ly),rsy=wy(ry);
+
+    // deep void
+    const vg=g.createLinearGradient(gsx,lsy,gsx,lsy+H*0.5);
+    vg.addColorStop(0,'rgba(0,0,0,.0)');
+    vg.addColorStop(0.15,na>0.4?'#03050f':'#04060c');
+    vg.addColorStop(1,'#000');
+    g.fillStyle=vg;
+    g.beginPath();
+    g.moveTo(gsx,lsy);
+    g.lineTo(gex,rsy);
+    g.lineTo(gex,lsy+H*0.6);
+    g.lineTo(gsx,lsy+H*0.6);
+    g.closePath();g.fill();
+
+    // left dirt edge
+    const lc=na>0.4?'#1e2c16':'#2e4020';
+    g.fillStyle=lc;
+    g.beginPath();
+    g.moveTo(gsx-10,lsy-4);g.lineTo(gsx+4,lsy);
+    g.bezierCurveTo(gsx+8,lsy+8,gsx+4,lsy+18,gsx+6,lsy+26);
+    g.lineTo(gsx-10,lsy+28);g.closePath();g.fill();
+    // right dirt edge
+    g.beginPath();
+    g.moveTo(gex+10,rsy-4);g.lineTo(gex-4,rsy);
+    g.bezierCurveTo(gex-8,rsy+8,gex-4,rsy+18,gex-6,rsy+26);
+    g.lineTo(gex+10,rsy+28);g.closePath();g.fill();
+
+    // jagged rocks left rim
+    g.fillStyle=na>0.4?'#2e2e40':'#484860';
+    for(let i=0;i<3;i++){
+      const rx=gsx+2+i*4,ry_=lsy-2-i*3;
+      g.beginPath();g.moveTo(rx,lsy+2);g.lineTo(rx-4,ry_);g.lineTo(rx+4,ry_);g.closePath();g.fill();
+    }
+    // jagged rocks right rim
+    for(let i=0;i<3;i++){
+      const rx=gex-2-i*4,ry_=rsy-2-i*3;
+      g.beginPath();g.moveTo(rx,rsy+2);g.lineTo(rx-4,ry_);g.lineTo(rx+4,ry_);g.closePath();g.fill();
+    }
+
+    // warning dashes above gap
+    if(gsx>-60&&gex<W+60){
+      const midX=(gsx+gex)/2,midY=Math.min(lsy,rsy)-28;
+      g.save();g.globalAlpha=0.6+0.4*Math.sin(Date.now()*0.006);
+      g.fillStyle='#ff4422';
+      g.font=`bold ${Math.round(H*0.038)}px -apple-system,sans-serif`;
+      g.textAlign='center';g.fillText('▼',midX,midY);
+      g.restore();
+    }
+  }
+}
 function drawTerrain(){
   const na=nightAmt(dayTime),dk=duskAmt(dayTime);
   let topC=lerpHex('#243416','#0e1a28',na);topC=lerpHex(topC,'#3a281a',dk*0.3);
   let edge=lerpHex('#406030','#1e3448',na);edge=lerpHex(edge,'#7a5028',dk*0.45);
   const x0=camX-40,x1=camX+W+40,step=10;
-  g.beginPath();let started=false;
-  for(let x=x0;x<=x1;x+=step){
-    const sy_=wy(tInfo(x).y),sx_=wx(x);
-    if(!started){g.moveTo(sx_,sy_);started=true;}else g.lineTo(sx_,sy_);
+
+  // Draw terrain in segments between gaps
+  function drawSegment(xs,xe){
+    g.beginPath();let started=false;
+    for(let x=xs;x<=xe+step;x+=step){
+      const cx=Math.min(x,xe);
+      const sy_=wy(tRaw(cx).y),sx_=wx(cx);
+      if(!started){g.moveTo(sx_,sy_);started=true;}else g.lineTo(sx_,sy_);
+    }
+    if(!started)return;
+    g.lineTo(wx(xe),H+40);g.lineTo(wx(xs),H+40);g.closePath();
+    const tg=g.createLinearGradient(0,wy(tGenY-H*0.3),0,H+40);
+    tg.addColorStop(0,topC);tg.addColorStop(1,lerpHex('#060c04','#020508',na));
+    g.fillStyle=tg;g.fill();
+    // edge stroke
+    g.beginPath();started=false;
+    for(let x=xs;x<=xe+step;x+=step){
+      const cx=Math.min(x,xe);
+      const sy_=wy(tRaw(cx).y),sx_=wx(cx);
+      if(!started){g.moveTo(sx_,sy_);started=true;}else g.lineTo(sx_,sy_);
+    }
+    g.strokeStyle=edge;g.lineWidth=2.6;g.lineJoin='round';g.stroke();
+    g.save();g.globalAlpha=0.20;g.lineWidth=6;g.stroke();g.restore();
   }
-  g.lineTo(wx(x1),H+40);g.lineTo(wx(x0),H+40);g.closePath();
-  const tg=g.createLinearGradient(0,wy(tGenY-H*0.3),0,H+40);
-  tg.addColorStop(0,topC);tg.addColorStop(1,lerpHex('#060c04','#020508',na));
-  g.fillStyle=tg;g.fill();
-  g.beginPath();started=false;
-  for(let x=x0;x<=x1;x+=step){
-    const sy_=wy(tInfo(x).y),sx_=wx(x);
-    if(!started){g.moveTo(sx_,sy_);started=true;}else g.lineTo(sx_,sy_);
+
+  // Collect all gap boundaries in view
+  const cuts=[x0];
+  for(const gap of gaps){
+    if(gap.e<x0||gap.s>x1)continue;
+    cuts.push(gap.s,gap.e);
   }
-  g.strokeStyle=edge;g.lineWidth=2.6;g.lineJoin='round';g.stroke();
-  g.save();g.globalAlpha=0.22;g.lineWidth=6;g.stroke();g.restore();
+  cuts.push(x1);
+  cuts.sort((a,b)=>a-b);
+  for(let i=0;i<cuts.length-1;i+=2){
+    if(!inGap((cuts[i]+cuts[i+1])/2))drawSegment(cuts[i],cuts[i+1]);
+  }
 }
 function drawObstacle(obs){
   const sx_=wx(obs.x),ti=tInfo(obs.x),sy_=wy(ti.y);
@@ -1000,12 +1107,12 @@ function startGame(){
   score=0;dist=0;sesCoins=0;camX=0;camY=0;
   currentLevel=1;levelTimer=LEVEL_SEC;levelPending=false;levelShowT=0;speedBoostActive=false;
   parts=[];popups=[];coins=[];trees=[];flies=[];obstacles=[];trail=[];scarf=[];
-  treeEnd=0;coinEnd=200;obstEnd=400;
+  gaps=[];gapFrontier=800;
+  treeEnd=0;coinEnd=200;obstEnd=350;
   terrain=[];tLastX=0;tGenY=0;tTrend=0;tTC=0;
   genTerrain(W+900);initPlayer();
-  // set initial camera to match player position
   camX=pl.x-W*0.28;camY=pl.y-H*0.44;
-  genTrees(W+900);genCoins(W+900);genObstacles(W+900);
+  genTrees(W+900);genCoins(W+900);genObstacles(W+900);genGaps(W+900);
   initClouds();state='playing';
 }
 
@@ -1030,7 +1137,7 @@ function loop(now){
       if(!pl.dead){
         dist+=pl.speed*dt;score+=pl.speed*0.042*dt;
         genTerrain(camX+W+900);genTrees(camX+W+900);
-        genCoins(camX+W+900);genObstacles(camX+W+900);
+        genCoins(camX+W+900);genObstacles(camX+W+900);genGaps(camX+W+900);
         // coin magnet + collect
         for(const cn of coins){
           if(cn.hit)continue;
@@ -1044,7 +1151,7 @@ function loop(now){
     // draw
     drawSky();drawStars();drawCelestials();drawClouds();drawMountains();
     for(const t of trees)if(t.lay===0)drawTree(t);
-    drawTerrain();
+    drawGaps();drawTerrain();
     for(const t of trees)if(t.lay===1)drawTree(t);
     for(const obs of obstacles)drawObstacle(obs);
     drawFlies();
